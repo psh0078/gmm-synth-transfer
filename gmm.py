@@ -1,3 +1,4 @@
+from argparse import ArgumentParser
 from pathlib import Path
 
 import numpy as np
@@ -201,9 +202,26 @@ def generate_synthetic_dataset(
     print(f"Saved synthetic dataset to {output_path}")
 
 
+def parse_args():
+    parser = ArgumentParser(description="Generate a synthetic dataset using a fitted GMM.")
+    parser.add_argument(
+        "input",
+        nargs="?",
+        default="og-transfer.csv",
+        help="Path to the CSV containing the real transfer records. Defaults to %(default)s.",
+    )
+    parser.add_argument(
+        "--output",
+        default="output/output.csv",
+        help="Path to write the synthetic CSV. Defaults to %(default)s.",
+    )
+    return parser.parse_args()
+
+
 def main():
-    data_path = Path("og-transfer.csv")
-    output_path = Path("output/output.csv")
+    args = parse_args()
+    data_path = Path(args.input)
+    output_path = Path(args.output)
     generate_synthetic_dataset(data_path, output_path)
 
 
