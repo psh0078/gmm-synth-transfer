@@ -1,11 +1,12 @@
-from argparse import ArgumentParser
 from pathlib import Path
+from argparse import ArgumentParser
+from utils import iter_progress, log_stage
 
 import numpy as np
 import pandas as pd
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import PowerTransformer
-
+from gmm_gpu import fit_best_gmm_gpu, invert_latent_samples_gpu, prepare_boxcox_features_gpu
 
 FEATURE_COLS = [
     "st_dirs",
@@ -35,10 +36,15 @@ DEFAULT_QUANTILE_LEVELS = np.array([0.0, 0.5, 0.9, 0.95, 0.99, 0.995], dtype=flo
 BOXCOX_SHIFT = 1.0
 BYTES_COL = "st_bytes_xfered"
 
-
 def load_dataframe(csv_path: Path) -> pd.DataFrame:
+    cache_path = csv_path.with_suffix(".parquet")
+    if cache_path.exists():
+        return pd.read_parquet(cache_path)
+
     df_raw = pd.read_csv(csv_path)
     df_raw = df_raw.rename(columns={df_raw.columns[0]: "record_id"})
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    df_raw.to_parquet(cache_path)
     return df_raw.copy()
 
 
@@ -65,7 +71,8 @@ def fit_best_gmm(X_boxcox: pd.DataFrame, component_grid=DEFAULT_COMPONENT_GRID, 
     bic_records = []
     best_model = None
     best_bic = np.inf
-    for n in component_grid:
+    component_iter = iter_progress(component_grid, desc="CPU GMM components")
+    for n in component_iter:
         gmm = GaussianMixture(
             n_components=n,
             covariance_type="full",
@@ -82,7 +89,6 @@ def fit_best_gmm(X_boxcox: pd.DataFrame, component_grid=DEFAULT_COMPONENT_GRID, 
         raise RuntimeError("GMM fitting failed to produce a model.")
     bic_df = pd.DataFrame(bic_records)
     return best_model, bic_df
-
 
 def quantile_calibrate(source_values, target_values, quantile_levels=None):
     source = np.asarray(source_values, dtype=float)
@@ -179,24 +185,61 @@ def generate_synthetic_dataset(
     output_path: Path,
     component_grid=DEFAULT_COMPONENT_GRID,
     quantile_levels=DEFAULT_QUANTILE_LEVELS,
+    use_gpu: bool = False,
+    gpu_kwargs: dict | None = None,
 ):
+    log_stage(f"Loading data from {data_path}")
     df = load_dataframe(data_path)
-    X_boxcox, transformer, constant_cols, constant_values = prepare_boxcox_features(df, FEATURE_COLS, BOXCOX_SHIFT)
-
-    best_gmm, bic_df = fit_best_gmm(X_boxcox, component_grid=component_grid)
+    if use_gpu:
+        gpu_kwargs = gpu_kwargs or {}
+        gpu_device = gpu_kwargs.get("device", "cuda")
+        log_stage("Preparing Box-Cox features on GPU")
+        (
+            X_boxcox_gpu,
+            transformer_gpu,
+            constant_cols,
+            constant_values,
+            feature_names,
+        ) = prepare_boxcox_features_gpu(df, FEATURE_COLS, BOXCOX_SHIFT, device=gpu_device)
+        log_stage("Training GMM on GPU")
+        best_gmm, bic_df = fit_best_gmm_gpu(X_boxcox_gpu, component_grid=component_grid, **gpu_kwargs)
+    else:
+        log_stage("Preparing Box-Cox features")
+        X_boxcox, transformer, constant_cols, constant_values = prepare_boxcox_features(df, FEATURE_COLS, BOXCOX_SHIFT)
+        feature_names = X_boxcox.columns
+        log_stage("Training GMM on CPU")
+        best_gmm, bic_df = fit_best_gmm(X_boxcox, component_grid=component_grid)
     print("BIC scores:\n", bic_df)
     print("Selected components:", best_gmm.n_components)
 
+    log_stage("Sampling from fitted GMM")
     latent_samples, labels = best_gmm.sample(len(df))
-    synthetic_features = invert_latent_samples(latent_samples, transformer, X_boxcox.columns, BOXCOX_SHIFT)
+    if use_gpu:
+        log_stage("Inverting Box-Cox transform on GPU")
+        synthetic_features = invert_latent_samples_gpu(
+            latent_samples,
+            transformer_gpu,
+            feature_names,
+            BOXCOX_SHIFT,
+            device=gpu_device,
+            index=df.index,
+        )
+    else:
+        log_stage("Inverting Box-Cox transform")
+        synthetic_features = invert_latent_samples(latent_samples, transformer, feature_names, BOXCOX_SHIFT)
 
+    log_stage("Calibrating bytes column")
     calibrate_bytes_column(synthetic_features, df, BYTES_COL, quantile_levels)
+    log_stage("Applying count constraints")
     apply_count_constraints(synthetic_features)
+    log_stage("Restoring constant columns")
     apply_constant_columns(synthetic_features, constant_cols, constant_values)
 
     synthetic_features["cluster"] = labels
+    log_stage("Assembling final dataset")
     synthetic_dataset = assemble_dataset(df, synthetic_features)
 
+    log_stage(f"Writing synthetic data to {output_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     synthetic_dataset.to_csv(output_path, index=False)
     print(f"Saved synthetic dataset to {output_path}")
@@ -215,6 +258,40 @@ def parse_args():
         default="output/output.csv",
         help="Path to write the synthetic CSV. Defaults to %(default)s.",
     )
+    parser.add_argument(
+        "--use-gpu",
+        action="store_true",
+        help="Train the GMM on a GPU using PyTorch.",
+    )
+    parser.add_argument(
+        "--gpu-device",
+        default="cuda",
+        help="Torch device string to use when --use-gpu is set. Defaults to %(default)s.",
+    )
+    parser.add_argument(
+        "--gpu-max-iter",
+        type=int,
+        default=200,
+        help="Max EM iterations for the GPU trainer. Defaults to %(default)s.",
+    )
+    parser.add_argument(
+        "--gpu-n-init",
+        type=int,
+        default=1,
+        help="Number of random initializations for the GPU trainer. Defaults to %(default)s.",
+    )
+    parser.add_argument(
+        "--gpu-tol",
+        type=float,
+        default=1e-3,
+        help="Convergence tolerance (in log-likelihood delta) for the GPU trainer. Defaults to %(default)s.",
+    )
+    parser.add_argument(
+        "--gpu-batch-size",
+        type=int,
+        default=0,
+        help="Batch size (in samples) for GPU EM responsibilities. Use 0 to process the full dataset. Defaults to %(default)s.",
+    )
     return parser.parse_args()
 
 
@@ -222,7 +299,21 @@ def main():
     args = parse_args()
     data_path = Path(args.input)
     output_path = Path(args.output)
-    generate_synthetic_dataset(data_path, output_path)
+    gpu_kwargs = None
+    if args.use_gpu:
+        gpu_kwargs = {
+            "device": args.gpu_device,
+            "max_iter": args.gpu_max_iter,
+            "n_init": args.gpu_n_init,
+            "tol": args.gpu_tol,
+            "batch_size": args.gpu_batch_size,
+        }
+    generate_synthetic_dataset(
+        data_path,
+        output_path,
+        use_gpu=args.use_gpu,
+        gpu_kwargs=gpu_kwargs,
+    )
 
 
 if __name__ == "__main__":
