@@ -17,6 +17,7 @@ FEATURE_COLS = [
     "st_bytes_xfered",
     "st_faults",
     "st_skipped_errors",
+    "duration_seconds",
 ]
 
 COUNT_LIKE_COLS = [
@@ -46,7 +47,6 @@ def load_dataframe(csv_path: Path) -> pd.DataFrame:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     df_raw.to_parquet(cache_path)
     return df_raw.copy()
-
 
 def prepare_boxcox_features(df: pd.DataFrame, feature_cols, boxcox_shift: float):
     X = df[feature_cols].copy()
