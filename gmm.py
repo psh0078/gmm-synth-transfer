@@ -1,6 +1,8 @@
+from dataclasses import dataclass
 from pathlib import Path
-from argparse import ArgumentParser
-from utils import iter_progress, log_stage
+from typing import Sequence
+
+from utils import iter_progress, log_stage, parse_args
 
 import numpy as np
 import pandas as pd
@@ -17,7 +19,7 @@ FEATURE_COLS = [
     "st_bytes_xfered",
     "st_faults",
     "st_skipped_errors",
-    "duration_seconds",
+    "st_xfer_time_ms"
 ]
 
 COUNT_LIKE_COLS = [
@@ -26,16 +28,15 @@ COUNT_LIKE_COLS = [
     "st_failed",
     "st_expired",
     "st_canceled",
-    "st_bytes_xfered",
     "st_faults",
 ]
 
 STATUS_COLS = ["st_successful", "st_failed", "st_expired", "st_canceled"]
 
-DEFAULT_COMPONENT_GRID = range(1, 15)
+# shrinking the range to only the cluster counts I "realistically" need
+DEFAULT_COMPONENT_GRID = [4, 8, 12, 16, 20]
 DEFAULT_QUANTILE_LEVELS = np.array([0.0, 0.5, 0.9, 0.95, 0.99, 0.995], dtype=float)
 BOXCOX_SHIFT = 1.0
-BYTES_COL = "st_bytes_xfered"
 
 def load_dataframe(csv_path: Path) -> pd.DataFrame:
     cache_path = csv_path.with_suffix(".parquet")
@@ -135,14 +136,6 @@ def invert_latent_samples(latent_samples, transformer, feature_names, boxcox_shi
     return synthetic
 
 
-def calibrate_bytes_column(synthetic_features: pd.DataFrame, df: pd.DataFrame, bytes_col: str, quantile_levels):
-    if bytes_col in synthetic_features.columns and bytes_col in df.columns:
-        target_values = df[bytes_col].astype(float).values
-        source_values = synthetic_features[bytes_col].astype(float).values
-        calibrated = quantile_calibrate(source_values, target_values, quantile_levels=quantile_levels)
-        synthetic_features[bytes_col] = np.clip(calibrated, 0, None)
-
-
 def apply_count_constraints(synthetic_features: pd.DataFrame):
     present_counts = [col for col in COUNT_LIKE_COLS if col in synthetic_features.columns]
     if present_counts:
@@ -179,6 +172,12 @@ def assemble_dataset(df: pd.DataFrame, synthetic_features: pd.DataFrame):
     synthetic_dataset = synthetic_dataset[df.columns]
     return synthetic_dataset
 
+def calibrate_feature_column(synthetic_features: pd.DataFrame, df: pd.DataFrame, col: str, quantile_levels):
+    if col in synthetic_features.columns and col in df.columns:
+        target_values = df[col].astype(float).values
+        source_values = synthetic_features[col].astype(float).values
+        calibrated = quantile_calibrate(source_values, target_values, quantile_levels=quantile_levels)
+        synthetic_features[col] = np.clip(calibrated, 0, None)
 
 def generate_synthetic_dataset(
     data_path: Path,
@@ -228,8 +227,9 @@ def generate_synthetic_dataset(
         log_stage("Inverting Box-Cox transform")
         synthetic_features = invert_latent_samples(latent_samples, transformer, feature_names, BOXCOX_SHIFT)
 
-    log_stage("Calibrating bytes column")
-    calibrate_bytes_column(synthetic_features, df, BYTES_COL, quantile_levels)
+    log_stage("Calibrating feature quantiles")
+    calibrate_feature_column(synthetic_features, df, "st_bytes_xfered", quantile_levels)
+    calibrate_feature_column(synthetic_features, df, "st_xfer_time_ms", quantile_levels)
     log_stage("Applying count constraints")
     apply_count_constraints(synthetic_features)
     log_stage("Restoring constant columns")
@@ -243,57 +243,6 @@ def generate_synthetic_dataset(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     synthetic_dataset.to_csv(output_path, index=False)
     print(f"Saved synthetic dataset to {output_path}")
-
-
-def parse_args():
-    parser = ArgumentParser(description="Generate a synthetic dataset using a fitted GMM.")
-    parser.add_argument(
-        "input",
-        nargs="?",
-        default="og-transfer.csv",
-        help="Path to the CSV containing the real transfer records. Defaults to %(default)s.",
-    )
-    parser.add_argument(
-        "--output",
-        default="output/output.csv",
-        help="Path to write the synthetic CSV. Defaults to %(default)s.",
-    )
-    parser.add_argument(
-        "--use-gpu",
-        action="store_true",
-        help="Train the GMM on a GPU using PyTorch.",
-    )
-    parser.add_argument(
-        "--gpu-device",
-        default="cuda",
-        help="Torch device string to use when --use-gpu is set. Defaults to %(default)s.",
-    )
-    parser.add_argument(
-        "--gpu-max-iter",
-        type=int,
-        default=200,
-        help="Max EM iterations for the GPU trainer. Defaults to %(default)s.",
-    )
-    parser.add_argument(
-        "--gpu-n-init",
-        type=int,
-        default=1,
-        help="Number of random initializations for the GPU trainer. Defaults to %(default)s.",
-    )
-    parser.add_argument(
-        "--gpu-tol",
-        type=float,
-        default=1e-3,
-        help="Convergence tolerance (in log-likelihood delta) for the GPU trainer. Defaults to %(default)s.",
-    )
-    parser.add_argument(
-        "--gpu-batch-size",
-        type=int,
-        default=0,
-        help="Batch size (in samples) for GPU EM responsibilities. Use 0 to process the full dataset. Defaults to %(default)s.",
-    )
-    return parser.parse_args()
-
 
 def main():
     args = parse_args()
@@ -314,7 +263,6 @@ def main():
         use_gpu=args.use_gpu,
         gpu_kwargs=gpu_kwargs,
     )
-
 
 if __name__ == "__main__":
     main()

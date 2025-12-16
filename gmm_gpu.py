@@ -9,7 +9,8 @@ try:
 except ImportError:
     torch = None
 
-DEFAULT_COMPONENT_GRID = range(1, 15)
+# shrinking the range to only the cluster counts I "realistically" need
+DEFAULT_COMPONENT_GRID = [4, 8, 12, 16, 20]
 
 def ensure_torch_tensor(data, device: str, dtype=torch.float32):
     if torch is None:
