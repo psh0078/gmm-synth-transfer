@@ -151,6 +151,7 @@ def prepare_boxcox_features_gpu(
     feature_cols: Sequence[str],
     boxcox_shift: float,
     device: str = "cuda",
+    dtype=None,
 ):
     if torch is None:
         raise ImportError("PyTorch is required for GPU-based Box-Cox preprocessing.")
@@ -162,10 +163,11 @@ def prepare_boxcox_features_gpu(
     if not train_cols:
         raise ValueError("No features left after removing constant columns for GPU pipeline.")
     torch_device = torch.device(device)
+    tensor_dtype = dtype or torch.float64
     tensor_input = torch.as_tensor(
         X_boxcox_input[train_cols].values,
         device=torch_device,
-        dtype=torch.float32,
+        dtype=tensor_dtype,
     )
     transformer = TorchPowerTransformer()
     transformed = transformer.fit_transform(tensor_input)
@@ -237,12 +239,15 @@ def fit_best_gmm_gpu(
     X_boxcox,
     component_grid=DEFAULT_COMPONENT_GRID,
     random_state: int = 42,
-    max_iter: int = 200,
+    max_iter: int = 400,
     tol: float = 1e-3,
-    n_init: int = 1,
-    reg_covar: float = 1e-3,
+    n_init: int = 2,
+    reg_covar: float = 5e-3,
     device: str = "cuda",
     batch_size: int | None = None,
+    dtype=None,
+    use_kmeans_init: bool = True,
+    kmeans_iters: int = 10,
 ):
     if torch is None:
         raise ImportError("PyTorch is required for GPU-based GMM training. Please install torch with CUDA support.")
@@ -250,10 +255,14 @@ def fit_best_gmm_gpu(
         raise RuntimeError("CUDA device requested but not available. Check your PyTorch installation or GPU drivers.")
 
     torch_device = torch.device(device)
-    data = ensure_torch_tensor(X_boxcox, torch_device, dtype=torch.float32)
+    tensor_dtype = dtype or torch.float64
+    data = ensure_torch_tensor(X_boxcox, torch_device, dtype=tensor_dtype)
     n_samples, n_features = data.shape
     if batch_size is None or batch_size <= 0:
-        batch_size = n_samples
+        em_batch_size = n_samples
+    else:
+        em_batch_size = batch_size
+    kmeans_batch_size = min(em_batch_size, n_samples)
     generator = torch.Generator(device=torch_device)
     generator.manual_seed(random_state)
 
@@ -261,7 +270,56 @@ def fit_best_gmm_gpu(
     eye = torch.eye(n_features, device=torch_device, dtype=data_dtype)
     log_2pi = torch.log(torch.tensor(2.0 * math.pi, device=torch_device, dtype=data_dtype))
 
+    def assign_clusters(centers):
+        labels = torch.empty(n_samples, dtype=torch.long, device=torch_device)
+        for start in range(0, n_samples, kmeans_batch_size):
+            end = min(start + kmeans_batch_size, n_samples)
+            batch = data[start:end]
+            distances = torch.cdist(batch, centers)
+            labels[start:end] = torch.argmin(distances, dim=1)
+        return labels
+
+    def compute_covariances_from_labels(labels, means):
+        covariances = torch.empty((means.shape[0], n_features, n_features), device=torch_device, dtype=data_dtype)
+        counts = torch.bincount(labels, minlength=means.shape[0]).to(device=torch_device, dtype=data_dtype)
+        total = torch.clamp(counts.sum(), min=torch.finfo(data_dtype).eps)
+        weights = counts / total
+        for comp in range(means.shape[0]):
+            mask = labels == comp
+            if mask.any():
+                centered = data[mask] - means[comp]
+                cov = centered.t().mm(centered) / torch.clamp(counts[comp], min=1.0)
+                covariances[comp] = cov + reg_covar * eye
+            else:
+                covariances[comp] = eye.clone()
+                weights[comp] = torch.tensor(1.0 / means.shape[0], device=torch_device, dtype=data_dtype)
+        weights = weights / torch.clamp(weights.sum(), min=torch.finfo(data_dtype).eps)
+        return weights, covariances
+
+    def kmeans_initialize_params(k: int):
+        indices = torch.randint(0, n_samples, (k,), device=torch_device, generator=generator)
+        centers = data[indices].clone()
+        for _ in range(max(1, kmeans_iters)):
+            labels = assign_clusters(centers)
+            updated = centers.clone()
+            for comp in range(k):
+                mask = labels == comp
+                if mask.any():
+                    updated[comp] = data[mask].mean(dim=0)
+                else:
+                    rand_idx = torch.randint(0, n_samples, (1,), device=torch_device, generator=generator)
+                    updated[comp] = data[rand_idx]
+            centers = updated
+        labels = assign_clusters(centers)
+        weights, covariances = compute_covariances_from_labels(labels, centers)
+        return weights, centers.clone(), covariances
+
     def initialize_params(k: int):
+        if use_kmeans_init:
+            try:
+                return kmeans_initialize_params(k)
+            except RuntimeError:
+                pass
         indices = torch.randint(0, n_samples, (k,), device=torch_device, generator=generator)
         means = data[indices].clone()
         covariances = eye.unsqueeze(0).repeat(k, 1, 1)
@@ -296,8 +354,8 @@ def fit_best_gmm_gpu(
                 second_moment = torch.zeros((k, n_features, n_features), device=torch_device, dtype=data_dtype)
                 total_ll = torch.tensor(0.0, device=torch_device, dtype=data_dtype)
 
-                for start in range(0, n_samples, batch_size):
-                    end = min(start + batch_size, n_samples)
+                for start in range(0, n_samples, em_batch_size):
+                    end = min(start + em_batch_size, n_samples)
                     batch = data[start:end]
                     batch_log_prob = estimate_log_gaussian_prob_batch(batch, means, covariances)
                     log_prob = batch_log_prob + log_weights

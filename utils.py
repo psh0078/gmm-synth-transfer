@@ -40,13 +40,13 @@ def parse_args():
     parser.add_argument(
         "--gpu-max-iter",
         type=int,
-        default=200,
+        default=400,
         help="Max EM iterations for the GPU trainer. Defaults to %(default)s.",
     )
     parser.add_argument(
         "--gpu-n-init",
         type=int,
-        default=1,
+        default=2,
         help="Number of random initializations for the GPU trainer. Defaults to %(default)s.",
     )
     parser.add_argument(
@@ -60,5 +60,22 @@ def parse_args():
         type=int,
         default=16384,
         help="Batch size (in samples) for GPU EM responsibilities. Use 0 to process the full dataset. Defaults to %(default)s.",
+    )
+    parser.add_argument(
+        "--gpu-reg-covar",
+        type=float,
+        default=5e-3,
+        help="Diagonal regularization strength added to GPU covariance matrices. Defaults to %(default)s.",
+    )
+    parser.add_argument(
+        "--gpu-kmeans-iters",
+        type=int,
+        default=10,
+        help="KMeans refinement steps for GPU initialization. Defaults to %(default)s.",
+    )
+    parser.add_argument(
+        "--gpu-disable-kmeans-init",
+        action="store_true",
+        help="Disable KMeans-based initialization on the GPU trainer.",
     )
     return parser.parse_args()

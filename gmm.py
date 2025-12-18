@@ -1,7 +1,4 @@
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
-
 from utils import iter_progress, log_stage, parse_args
 
 import numpy as np
@@ -34,9 +31,14 @@ COUNT_LIKE_COLS = [
 STATUS_COLS = ["st_successful", "st_failed", "st_expired", "st_canceled"]
 
 # shrinking the range to only the cluster counts I "realistically" need
-DEFAULT_COMPONENT_GRID = [4, 8, 12, 16, 20]
-DEFAULT_QUANTILE_LEVELS = np.array([0.0, 0.5, 0.9, 0.95, 0.99, 0.995], dtype=float)
+DEFAULT_COMPONENT_GRID = [8, 12, 16, 24, 32]
+DEFAULT_QUANTILE_LEVELS = np.array([0.0, 0.5, 0.9, 0.95, 0.99, 0.995, ], dtype=float)
 BOXCOX_SHIFT = 1.0
+CALIBRATION_COLS = [
+    "st_bytes_xfered",
+    "st_xfer_time_ms",
+]
+DEFAULT_REG_COVAR = 5e-3
 
 def load_dataframe(csv_path: Path) -> pd.DataFrame:
     cache_path = csv_path.with_suffix(".parquet")
@@ -68,7 +70,12 @@ def prepare_boxcox_features(df: pd.DataFrame, feature_cols, boxcox_shift: float)
     return X_boxcox, transformer, constant_cols, constant_values
 
 
-def fit_best_gmm(X_boxcox: pd.DataFrame, component_grid=DEFAULT_COMPONENT_GRID, random_state=42):
+def fit_best_gmm(
+    X_boxcox: pd.DataFrame,
+    component_grid=DEFAULT_COMPONENT_GRID,
+    random_state=42,
+    reg_covar: float = DEFAULT_REG_COVAR,
+):
     bic_records = []
     best_model = None
     best_bic = np.inf
@@ -78,7 +85,8 @@ def fit_best_gmm(X_boxcox: pd.DataFrame, component_grid=DEFAULT_COMPONENT_GRID, 
             n_components=n,
             covariance_type="full",
             random_state=random_state,
-            reg_covar=1e-6,
+            reg_covar=reg_covar,
+            max_iter=500,
         )
         gmm.fit(X_boxcox)
         bic = gmm.bic(X_boxcox)
@@ -201,13 +209,18 @@ def generate_synthetic_dataset(
             feature_names,
         ) = prepare_boxcox_features_gpu(df, FEATURE_COLS, BOXCOX_SHIFT, device=gpu_device)
         log_stage("Training GMM on GPU")
-        best_gmm, bic_df = fit_best_gmm_gpu(X_boxcox_gpu, component_grid=component_grid, **gpu_kwargs)
+        gpu_args = gpu_kwargs | {"dtype": transformer_gpu.dtype}
+        best_gmm, bic_df = fit_best_gmm_gpu(
+            X_boxcox_gpu,
+            component_grid=component_grid,
+            **gpu_args,
+        )
     else:
         log_stage("Preparing Box-Cox features")
         X_boxcox, transformer, constant_cols, constant_values = prepare_boxcox_features(df, FEATURE_COLS, BOXCOX_SHIFT)
         feature_names = X_boxcox.columns
         log_stage("Training GMM on CPU")
-        best_gmm, bic_df = fit_best_gmm(X_boxcox, component_grid=component_grid)
+        best_gmm, bic_df = fit_best_gmm(X_boxcox, component_grid=component_grid, reg_covar=DEFAULT_REG_COVAR)
     print("BIC scores:\n", bic_df)
     print("Selected components:", best_gmm.n_components)
 
@@ -228,8 +241,8 @@ def generate_synthetic_dataset(
         synthetic_features = invert_latent_samples(latent_samples, transformer, feature_names, BOXCOX_SHIFT)
 
     log_stage("Calibrating feature quantiles")
-    calibrate_feature_column(synthetic_features, df, "st_bytes_xfered", quantile_levels)
-    calibrate_feature_column(synthetic_features, df, "st_xfer_time_ms", quantile_levels)
+    for col in CALIBRATION_COLS:
+        calibrate_feature_column(synthetic_features, df, col, quantile_levels)
     log_stage("Applying count constraints")
     apply_count_constraints(synthetic_features)
     log_stage("Restoring constant columns")
@@ -256,6 +269,9 @@ def main():
             "n_init": args.gpu_n_init,
             "tol": args.gpu_tol,
             "batch_size": args.gpu_batch_size,
+            "reg_covar": args.gpu_reg_covar,
+            "use_kmeans_init": not args.gpu_disable_kmeans_init,
+            "kmeans_iters": args.gpu_kmeans_iters,
         }
     generate_synthetic_dataset(
         data_path,
