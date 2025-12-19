@@ -32,7 +32,7 @@ STATUS_COLS = ["st_successful", "st_failed", "st_expired", "st_canceled"]
 
 # shrinking the range to only the cluster counts I "realistically" need
 DEFAULT_COMPONENT_GRID = [8, 12, 16, 24, 32]
-DEFAULT_QUANTILE_LEVELS = np.array([0.0, 0.5, 0.9, 0.95, 0.99, 0.995, ], dtype=float)
+DEFAULT_QUANTILE_LEVELS = np.array([0.0, 0.5, 0.9, 0.95, 0.99, 0.999, 0.9999, 0.99999], dtype=float)
 BOXCOX_SHIFT = 1.0
 CALIBRATION_COLS = [
     "st_bytes_xfered",
