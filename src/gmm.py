@@ -70,6 +70,7 @@ def prepare_boxcox_features(df: pd.DataFrame, feature_cols, boxcox_shift: float)
     return X_boxcox, transformer, constant_cols, constant_values
 
 
+# BIC-guided model selection
 def fit_best_gmm(
     X_boxcox: pd.DataFrame,
     component_grid=DEFAULT_COMPONENT_GRID,
