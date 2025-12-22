@@ -1,15 +1,12 @@
 # gmm-guided synthetic transfer data
 
-for ICPE'26 or eScience'26
+## Environment (uv)
 
-## GPU-accelerated GMM training
+- Install [uv](https://github.com/astral-sh/uv) if you do not already have it: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- Sync the project dependencies and create `.venv`: `uv sync`
+- Either activate the venv (`source .venv/bin/activate`) or prefix commands with `uv run` to use the locked toolchain.
+- Python 3.13+ is required; uv will install it automatically when syncing.
 
-You can train the Gaussian mixture on a CUDA-capable GPU by installing a PyTorch build with CUDA support and enabling the GPU trainer:
+## Train the GMM
 
-```bash
-python gmm.py og-transfer.csv --output output/output.csv --use-gpu --gpu-device cuda:0
-```
-
-The GPU path uses custom PyTorch implementations (`fit_best_gmm_gpu`, `TorchPowerTransformer`) so preprocessing (Box-Cox) and GMM fitting both run on the selected CUDA device while keeping the rest of the synthetic generation pipeline unchanged.
-
-Optional: install `tqdm` to see progress bars for the component search and GPU EM iterations (`pip install tqdm`).
+- GPU training: `uv run python gmm.py datasets/filtered.csv --output output/output.csv --use-gpu --gpu-device cuda:1 --gpu-batch-size 32768`
