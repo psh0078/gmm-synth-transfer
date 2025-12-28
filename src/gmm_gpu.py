@@ -111,35 +111,29 @@ class TorchPowerTransformer:
         centered = transformed - transformed.mean()
         var = torch.mean(centered * centered)
         var = torch.clamp(var, min=1e-12)
-        llf = (lam - 1.0) * torch.sum(torch.log(data)) - 0.5 * data.shape[0] * torch.log(var)
-        return float(llf.item())
+        return (lam - 1.0) * torch.sum(torch.log(data)) - 0.5 * data.shape[0] * torch.log(var)
 
     def _find_lambda(self, data: torch.Tensor):
-        lower, upper = -2.0, 2.0
-        tol = 1e-5
+        lower = torch.tensor(-2.0, device=data.device, dtype=data.dtype)
+        upper = torch.tensor(2.0, device=data.device, dtype=data.dtype)
         invphi = (math.sqrt(5) - 1) / 2
         invphi2 = (3 - math.sqrt(5)) / 2
         a, b = lower, upper
-        h = b - a
-        if h <= tol:
-            return torch.tensor((a + b) / 2.0, device=data.device, dtype=data.dtype)
-        c = a + invphi2 * h
-        d = a + invphi * h
+        c = a + invphi2 * (b - a)
+        d = a + invphi * (b - a)
         yc = self._boxcox_llf(c, data)
         yd = self._boxcox_llf(d, data)
-        while abs(b - a) > tol:
-            if yc > yd:
-                b, d, yd = d, c, yc
-                h = invphi * (b - a)
-                c = a + invphi2 * (b - a)
-                yc = self._boxcox_llf(c, data)
-            else:
-                a, c, yc = c, d, yd
-                h = invphi * (b - a)
-                d = a + invphi * (b - a)
-                yd = self._boxcox_llf(d, data)
-        lam_est = (a + b) / 2.0
-        return torch.tensor(lam_est, device=data.device, dtype=data.dtype)
+        max_iters = 64
+        for _ in range(max_iters):
+            mask = yc > yd
+            new_a = torch.where(mask, a, c)
+            new_b = torch.where(mask, d, b)
+            new_c = torch.where(mask, a + invphi2 * (d - a), d)
+            new_d = torch.where(mask, c, c + invphi * (b - c))
+            new_yc = torch.where(mask, self._boxcox_llf(new_c, data), yd)
+            new_yd = torch.where(mask, yc, self._boxcox_llf(new_d, data))
+            a, b, c, d, yc, yd = new_a, new_b, new_c, new_d, new_yc, new_yd
+        return 0.5 * (a + b)
 
     def _check_is_fitted(self):
         if self.lambdas_ is None:
