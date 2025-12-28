@@ -329,8 +329,7 @@ def fit_best_gmm_gpu(
     def estimate_log_gaussian_prob_batch(batch, means, covariances):
         log_probs = []
         for comp in range(means.shape[0]):
-            cov = covariances[comp] + reg_covar * eye
-            L = torch.linalg.cholesky(cov)
+            L = torch.linalg.cholesky(covariances[comp])
             diff = batch - means[comp]
             sol = torch.cholesky_solve(diff.unsqueeze(-1), L)
             maha = torch.sum(diff.unsqueeze(-1) * sol, dim=1).squeeze(-1)

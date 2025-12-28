@@ -241,9 +241,9 @@ def generate_synthetic_dataset(
         log_stage("Inverting Box-Cox transform")
         synthetic_features = invert_latent_samples(latent_samples, transformer, feature_names, BOXCOX_SHIFT)
 
-    log_stage("Calibrating feature quantiles")
-    for col in CALIBRATION_COLS:
-        calibrate_feature_column(synthetic_features, df, col, quantile_levels)
+    # log_stage("Calibrating feature quantiles")
+    # for col in CALIBRATION_COLS:
+    #     calibrate_feature_column(synthetic_features, df, col, quantile_levels)
     log_stage("Applying count constraints")
     apply_count_constraints(synthetic_features)
     log_stage("Restoring constant columns")
