@@ -326,15 +326,23 @@ def fit_best_gmm_gpu(
         weights = torch.full((k,), 1.0 / k, device=torch_device, dtype=data_dtype)
         return weights, means, covariances
 
-    def estimate_log_gaussian_prob_batch(batch, means, covariances):
+    def precompute_cholesky(covariances):
+        cholesky_factors = []
+        log_dets = []
+        for comp in range(covariances.shape[0]):
+            L = torch.linalg.cholesky(covariances[comp])
+            cholesky_factors.append(L)
+            log_dets.append(2.0 * torch.log(torch.diagonal(L)).sum())
+        return cholesky_factors, torch.stack(log_dets)
+
+    def estimate_log_gaussian_prob_batch(batch, means, cholesky_factors, log_dets):
         log_probs = []
         for comp in range(means.shape[0]):
-            L = torch.linalg.cholesky(covariances[comp])
+            L = cholesky_factors[comp]
             diff = batch - means[comp]
             sol = torch.cholesky_solve(diff.unsqueeze(-1), L)
             maha = torch.sum(diff.unsqueeze(-1) * sol, dim=1).squeeze(-1)
-            log_det = 2.0 * torch.log(torch.diagonal(L)).sum()
-            norm = batch.shape[1] * log_2pi + log_det
+            norm = batch.shape[1] * log_2pi + log_dets[comp]
             log_probs.append(-0.5 * (norm + maha))
         return torch.stack(log_probs, dim=1)
 
@@ -352,11 +360,11 @@ def fit_best_gmm_gpu(
                 first_moment = torch.zeros((k, n_features), device=torch_device, dtype=data_dtype)
                 second_moment = torch.zeros((k, n_features, n_features), device=torch_device, dtype=data_dtype)
                 total_ll = torch.tensor(0.0, device=torch_device, dtype=data_dtype)
-
+                cholesky_factors, log_dets = precompute_cholesky(covariances)
                 for start in range(0, n_samples, em_batch_size):
                     end = min(start + em_batch_size, n_samples)
                     batch = data[start:end]
-                    batch_log_prob = estimate_log_gaussian_prob_batch(batch, means, covariances)
+                    batch_log_prob = estimate_log_gaussian_prob_batch(batch, means, cholesky_factors, log_dets)
                     log_prob = batch_log_prob + log_weights
                     log_prob_norm = torch.logsumexp(log_prob, dim=1, keepdim=True)
                     resp = torch.exp(log_prob - log_prob_norm)
