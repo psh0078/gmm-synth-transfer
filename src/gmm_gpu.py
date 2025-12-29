@@ -157,7 +157,7 @@ def prepare_boxcox_features_gpu(
     if not train_cols:
         raise ValueError("No features left after removing constant columns for GPU pipeline.")
     torch_device = torch.device(device)
-    tensor_dtype = dtype or torch.float64
+    tensor_dtype = dtype or torch.float32
     tensor_input = torch.as_tensor(
         X_boxcox_input[train_cols].values,
         device=torch_device,
@@ -249,7 +249,7 @@ def fit_best_gmm_gpu(
         raise RuntimeError("CUDA device requested but not available. Check your PyTorch installation or GPU drivers.")
 
     torch_device = torch.device(device)
-    tensor_dtype = dtype or torch.float64
+    tensor_dtype = dtype or torch.float32
     data = ensure_torch_tensor(X_boxcox, torch_device, dtype=tensor_dtype)
     n_samples, n_features = data.shape
     if batch_size is None or batch_size <= 0:

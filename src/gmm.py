@@ -195,6 +195,7 @@ def generate_synthetic_dataset(
     quantile_levels=DEFAULT_QUANTILE_LEVELS,
     use_gpu: bool = False,
     gpu_kwargs: dict | None = None,
+    seed: int = 42,
 ):
     log_stage(f"Loading data from {data_path}")
     df = load_dataframe(data_path)
@@ -210,7 +211,7 @@ def generate_synthetic_dataset(
             feature_names,
         ) = prepare_boxcox_features_gpu(df, FEATURE_COLS, BOXCOX_SHIFT, device=gpu_device)
         log_stage("Training GMM on GPU")
-        gpu_args = gpu_kwargs | {"dtype": transformer_gpu.dtype}
+        gpu_args = gpu_kwargs | {"dtype": transformer_gpu.dtype, "random_state": seed}
         best_gmm, bic_df = fit_best_gmm_gpu(
             X_boxcox_gpu,
             component_grid=component_grid,
@@ -221,12 +222,17 @@ def generate_synthetic_dataset(
         X_boxcox, transformer, constant_cols, constant_values = prepare_boxcox_features(df, FEATURE_COLS, BOXCOX_SHIFT)
         feature_names = X_boxcox.columns
         log_stage("Training GMM on CPU")
-        best_gmm, bic_df = fit_best_gmm(X_boxcox, component_grid=component_grid, reg_covar=DEFAULT_REG_COVAR)
+        best_gmm, bic_df = fit_best_gmm(
+            X_boxcox,
+            component_grid=component_grid,
+            reg_covar=DEFAULT_REG_COVAR,
+            random_state=seed,
+        )
     print("BIC scores:\n", bic_df)
     print("Selected components:", best_gmm.n_components)
 
     log_stage("Sampling from fitted GMM")
-    latent_samples, labels = best_gmm.sample(len(df))
+    latent_samples, labels = best_gmm.sample(len(df), random_state=seed)
     if use_gpu:
         log_stage("Inverting Box-Cox transform on GPU")
         synthetic_features = invert_latent_samples_gpu(
@@ -241,9 +247,9 @@ def generate_synthetic_dataset(
         log_stage("Inverting Box-Cox transform")
         synthetic_features = invert_latent_samples(latent_samples, transformer, feature_names, BOXCOX_SHIFT)
 
-    # log_stage("Calibrating feature quantiles")
-    # for col in CALIBRATION_COLS:
-    #     calibrate_feature_column(synthetic_features, df, col, quantile_levels)
+    log_stage("Calibrating feature quantiles")
+    for col in CALIBRATION_COLS:
+        calibrate_feature_column(synthetic_features, df, col, quantile_levels)
     log_stage("Applying count constraints")
     apply_count_constraints(synthetic_features)
     log_stage("Restoring constant columns")
@@ -279,6 +285,7 @@ def main():
         output_path,
         use_gpu=args.use_gpu,
         gpu_kwargs=gpu_kwargs,
+        seed=args.seed,
     )
 
 if __name__ == "__main__":

@@ -78,4 +78,10 @@ def parse_args():
         action="store_true",
         help="Disable KMeans-based initialization on the GPU trainer.",
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducible training and sampling. Defaults to %(default)s.",
+    )
     return parser.parse_args()
