@@ -36,10 +36,6 @@ COUNT_LIKE_COLS = [
 DEFAULT_COMPONENT_GRID = [8, 12, 16, 24, 32]
 DEFAULT_QUANTILE_LEVELS = np.array([0.0, 0.5, 0.9, 0.95, 0.99, 0.999, 0.9999, 0.99999], dtype=float)
 BOXCOX_SHIFT = 1.0
-CALIBRATION_COLS = [
-    "st_bytes_xfered",
-    # "st_xfer_time_ms",
-]
 DEFAULT_REG_COVAR = 5e-3
 
 def load_dataframe(csv_path: Path) -> pd.DataFrame:
@@ -237,7 +233,7 @@ def generate_synthetic_dataset(
         synthetic_features = invert_latent_samples(latent_samples, transformer, feature_names, BOXCOX_SHIFT)
 
     log_stage("Calibrating feature quantiles")
-    for col in CALIBRATION_COLS:
+    for col in FEATURE_COLS:
         calibrate_feature_column(synthetic_features, df, col, quantile_levels)
     log_stage("Applying count constraints")
     apply_count_constraints(synthetic_features)
