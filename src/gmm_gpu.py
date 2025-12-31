@@ -26,7 +26,6 @@ def ensure_torch_tensor(data, device: str, dtype=torch.float32):
 
 class TorchPowerTransformer:
     """Torch implementation of sklearn's PowerTransformer (Box-Cox)."""
-
     def __init__(self, standardize: bool = True):
         if torch is None:
             raise ImportError("PyTorch is required for TorchPowerTransformer.")

@@ -1,5 +1,9 @@
+import json
+from pathlib import Path
 from typing import Iterable
 from argparse import ArgumentParser
+
+import pandas as pd
 
 try:
     from tqdm import tqdm
@@ -13,6 +17,32 @@ def iter_progress(iterable: Iterable, desc: str | None = None, leave: bool = Tru
 
 def log_stage(message: str):
     print(f"[stage] {message}")
+
+def summarize_stats(real_df: pd.DataFrame, synth_df: pd.DataFrame, columns) -> pd.DataFrame:
+    """Return side-by-side describe stats for the requested columns."""
+    stats_real = real_df[columns].describe().T[["mean", "std", "min", "max"]]
+    stats_synth = synth_df[columns].describe().T[["mean", "std", "min", "max"]]
+    summary = pd.concat(
+        [stats_real.add_suffix("_real"), stats_synth.add_suffix("_synth")],
+        axis=1,
+    )
+    return summary
+
+def write_eval_report(report_path: Path, real_df: pd.DataFrame, synth_df: pd.DataFrame):
+    """Write descriptive stats for real vs synthetic data to JSON."""
+    columns = real_df.columns.intersection(synth_df.columns)
+    if columns.empty:
+        log_stage("No overlapping columns to evaluate; skipping report.")
+        return
+    summary = summarize_stats(real_df, synth_df, columns)
+    payload = {
+        "columns": list(columns),
+        "descriptive_stats": summary.reset_index(names="feature").to_dict(orient="records"),
+    }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    print(f"Wrote JSON evaluation report to {report_path}")
 
 def parse_args():
     parser = ArgumentParser(description="Generate a synthetic dataset using a fitted GMM.")

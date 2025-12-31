@@ -1,5 +1,5 @@
 from pathlib import Path
-from utils import iter_progress, log_stage, parse_args
+from utils import iter_progress, log_stage, parse_args, summarize_stats, write_eval_report
 
 import numpy as np
 import pandas as pd
@@ -8,6 +8,7 @@ from sklearn.preprocessing import PowerTransformer
 from gmm_gpu import fit_best_gmm_gpu, invert_latent_samples_gpu, prepare_boxcox_features_gpu
 
 FEATURE_COLS = [
+    "st_files",
     "st_dirs",
     "st_successful",
     "st_failed",
@@ -15,20 +16,21 @@ FEATURE_COLS = [
     "st_canceled",
     "st_bytes_xfered",
     "st_faults",
+    "st_files_skipped",
     "st_skipped_errors",
     "st_xfer_time_ms"
 ]
 
 COUNT_LIKE_COLS = [
+    "st_files",
     "st_dirs",
     "st_successful",
     "st_failed",
     "st_expired",
     "st_canceled",
     "st_faults",
+    "st_files_skipped",
 ]
-
-STATUS_COLS = ["st_successful", "st_failed", "st_expired", "st_canceled"]
 
 # shrinking the range to only the cluster counts I "realistically" need
 DEFAULT_COMPONENT_GRID = [8, 12, 16, 24, 32]
@@ -36,7 +38,7 @@ DEFAULT_QUANTILE_LEVELS = np.array([0.0, 0.5, 0.9, 0.95, 0.99, 0.999, 0.9999, 0.
 BOXCOX_SHIFT = 1.0
 CALIBRATION_COLS = [
     "st_bytes_xfered",
-    "st_xfer_time_ms",
+    # "st_xfer_time_ms",
 ]
 DEFAULT_REG_COVAR = 5e-3
 
@@ -44,9 +46,7 @@ def load_dataframe(csv_path: Path) -> pd.DataFrame:
     cache_path = csv_path.with_suffix(".parquet")
     if cache_path.exists():
         return pd.read_parquet(cache_path)
-
     df_raw = pd.read_csv(csv_path)
-    df_raw = df_raw.rename(columns={df_raw.columns[0]: "record_id"})
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     df_raw.to_parquet(cache_path)
     return df_raw.copy()
@@ -151,17 +151,6 @@ def apply_count_constraints(synthetic_features: pd.DataFrame):
         rounded = synthetic_features[present_counts].round().clip(lower=0)
         synthetic_features[present_counts] = rounded.astype(int)
 
-    status_cols = [col for col in STATUS_COLS if col in synthetic_features.columns]
-    totals = None
-    if status_cols:
-        totals = synthetic_features[status_cols].sum(axis=1)
-    if "st_dirs" in synthetic_features.columns:
-        dirs_series = synthetic_features["st_dirs"]
-        totals = dirs_series if totals is None else totals + dirs_series
-    if totals is None:
-        totals = pd.Series(0, index=synthetic_features.index)
-    synthetic_features["st_files"] = totals.clip(lower=0).round().astype(int)
-
     if {"st_dirs", "st_files"}.issubset(synthetic_features.columns):
         dirs = synthetic_features["st_dirs"].astype(int)
         files = synthetic_features["st_files"].astype(int)
@@ -263,6 +252,9 @@ def generate_synthetic_dataset(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     synthetic_dataset.to_csv(output_path, index=False)
     print(f"Saved synthetic dataset to {output_path}")
+
+    log_stage("Building evaluation report (describe stats)")
+    write_eval_report(Path("output/stats.json"), df, synthetic_dataset)
 
 def main():
     args = parse_args()
