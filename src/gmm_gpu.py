@@ -1,6 +1,7 @@
 import math
 from typing import Sequence
 
+import numpy as np
 import pandas as pd
 from utils import iter_progress
 
@@ -8,9 +9,6 @@ try:
     import torch
 except ImportError:
     torch = None
-
-# shrinking the range to only the cluster counts I "realistically" need instead of something like [1,2,3, ...]
-DEFAULT_COMPONENT_GRID = [4, 8, 12, 16, 20]
 
 def ensure_torch_tensor(data, device: str, dtype=torch.float32):
     if torch is None:
@@ -22,7 +20,6 @@ def ensure_torch_tensor(data, device: str, dtype=torch.float32):
     else:
         array = data
     return torch.as_tensor(array, device=device, dtype=dtype)
-
 
 class TorchPowerTransformer:
     """Torch implementation of sklearn's PowerTransformer (Box-Cox)."""
@@ -138,7 +135,6 @@ class TorchPowerTransformer:
         if self.lambdas_ is None:
             raise RuntimeError("TorchPowerTransformer must be fitted before calling transform.")
 
-
 def prepare_boxcox_features_gpu(
     df: pd.DataFrame,
     feature_cols: Sequence[str],
@@ -166,7 +162,6 @@ def prepare_boxcox_features_gpu(
     transformed = transformer.fit_transform(tensor_input)
     return transformed, transformer, constant_cols, constant_values, train_cols
 
-
 def invert_latent_samples_gpu(
     latent_samples,
     transformer: TorchPowerTransformer,
@@ -186,6 +181,55 @@ def invert_latent_samples_gpu(
     if index is not None:
         synthetic_df.index = index
     return synthetic_df
+
+def sample_with_max_cap(
+    gmm,
+    n_samples: int,
+    feature_names: Sequence[str],
+    cap_values: pd.Series,
+    boxcox_shift: float,
+    transformer: TorchPowerTransformer,
+    device: str = "cuda",
+    seed: int = 42,
+    max_draws: int = 5,
+):
+    if torch is None:
+        raise ImportError("PyTorch is required for GPU-based capped sampling.")
+    if transformer is None:
+        raise ValueError("GPU transformer is required for sample_with_max_cap.")
+    synthetic = pd.DataFrame(index=np.arange(n_samples), columns=feature_names, dtype=float)
+    labels_out = np.empty(n_samples, dtype=int)
+    remaining_idx = np.arange(n_samples)
+    attempt = 0
+    last_remaining_features = None
+    last_remaining_labels = None
+    while remaining_idx.size > 0 and attempt < max_draws:
+        latent_samples, labels = gmm.sample(len(remaining_idx), random_state=seed + attempt)
+        features = invert_latent_samples_gpu(
+            latent_samples,
+            transformer,
+            feature_names,
+            boxcox_shift,
+            device=device,
+        )
+        within_cap = (features <= cap_values).all(axis=1)
+        if within_cap.any():
+            ok_idx = remaining_idx[within_cap.values]
+            synthetic.loc[ok_idx] = features.loc[within_cap].values
+            labels_out[ok_idx] = labels[within_cap.values]
+        rejected_mask = ~within_cap.values
+        last_remaining_features = features.loc[rejected_mask]
+        last_remaining_labels = labels[rejected_mask]
+        remaining_idx = remaining_idx[rejected_mask]
+        attempt += 1
+
+    if remaining_idx.size > 0:
+        if last_remaining_features is None or last_remaining_labels is None:
+            raise RuntimeError("Capped sampling exhausted without residual samples.")
+        synthetic.loc[remaining_idx] = last_remaining_features.values
+        labels_out[remaining_idx] = last_remaining_labels
+
+    return synthetic, labels_out
 
 class TorchGaussianMixture:
     def __init__(self, weights, means, covariances, log_likelihood, device, dtype):
@@ -227,10 +271,9 @@ class TorchGaussianMixture:
 
         return samples.cpu().numpy(), component_ids.cpu().numpy()
 
-
 def fit_best_gmm_gpu(
     X_boxcox,
-    component_grid=DEFAULT_COMPONENT_GRID,
+    component_grid,
     random_state: int = 42,
     max_iter: int = 400,
     tol: float = 1e-3,

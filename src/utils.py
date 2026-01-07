@@ -18,43 +18,17 @@ def iter_progress(iterable: Iterable, desc: str | None = None, leave: bool = Tru
 def log_stage(message: str):
     print(f"[stage] {message}")
 
-def summarize_stats(real_df: pd.DataFrame, synth_df: pd.DataFrame, columns) -> pd.DataFrame:
-    """Return side-by-side describe stats for the requested columns."""
-    stats_real = real_df[columns].describe().T[["mean", "std", "min", "max"]]
-    stats_synth = synth_df[columns].describe().T[["mean", "std", "min", "max"]]
-    summary = pd.concat(
-        [stats_real.add_suffix("_real"), stats_synth.add_suffix("_synth")],
-        axis=1,
-    )
-    return summary
-
-def write_eval_report(report_path: Path, real_df: pd.DataFrame, synth_df: pd.DataFrame):
-    """Write descriptive stats for real vs synthetic data to JSON."""
-    columns = real_df.columns.intersection(synth_df.columns)
-    if columns.empty:
-        log_stage("No overlapping columns to evaluate; skipping report.")
-        return
-    summary = summarize_stats(real_df, synth_df, columns)
-    payload = {
-        "columns": list(columns),
-        "descriptive_stats": summary.reset_index(names="feature").to_dict(orient="records"),
-    }
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(report_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-    print(f"Wrote JSON evaluation report to {report_path}")
-
 def parse_args():
     parser = ArgumentParser(description="Generate a synthetic dataset using a fitted GMM.")
     parser.add_argument(
         "input",
         nargs="?",
-        default="datasets/filtered.csv",
+        default="../datasets/filtered.csv",
         help="Path to the CSV containing the real transfer records. Defaults to %(default)s.",
     )
     parser.add_argument(
         "--output",
-        default="output/output.csv",
+        default="../output/output.csv",
         help="Path to write the synthetic CSV. Defaults to %(default)s.",
     )
     parser.add_argument(
@@ -68,45 +42,15 @@ def parse_args():
         help="Torch device string to use when --use-gpu is set. Defaults to %(default)s.",
     )
     parser.add_argument(
-        "--gpu-max-iter",
-        type=int,
-        default=400,
-        help="Max EM iterations for the GPU trainer. Defaults to %(default)s.",
-    )
-    parser.add_argument(
-        "--gpu-n-init",
-        type=int,
-        default=2,
-        help="Number of random initializations for the GPU trainer. Defaults to %(default)s.",
-    )
-    parser.add_argument(
-        "--gpu-tol",
-        type=float,
-        default=1e-3,
-        help="Convergence tolerance (in log-likelihood delta) for the GPU trainer. Defaults to %(default)s.",
-    )
-    parser.add_argument(
         "--gpu-batch-size",
         type=int,
         default=16384,
         help="Batch size (in samples) for GPU EM responsibilities. Use 0 to process the full dataset. Defaults to %(default)s.",
     )
     parser.add_argument(
-        "--gpu-reg-covar",
-        type=float,
-        default=5e-3,
-        help="Diagonal regularization strength added to GPU covariance matrices. Defaults to %(default)s.",
-    )
-    parser.add_argument(
-        "--gpu-kmeans-iters",
-        type=int,
-        default=10,
-        help="KMeans refinement steps for GPU initialization. Defaults to %(default)s.",
-    )
-    parser.add_argument(
-        "--gpu-disable-kmeans-init",
+        "--gpu-max-cap",
         action="store_true",
-        help="Disable KMeans-based initialization on the GPU trainer.",
+        help="Apply max-capping during GPU sampling.",
     )
     parser.add_argument(
         "--seed",
