@@ -5,6 +5,7 @@ description = "cooking something"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "cupy-cuda11x>=13.6.0",
     "matplotlib>=3.10.7",
     "numpy>=2.3.3",
     "pandas>=2.3.3",
