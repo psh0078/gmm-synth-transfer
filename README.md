@@ -9,4 +9,4 @@
 
 ## Train the GMM
 
-- GPU training: `uv run python gmm.py datasets/filtered.csv --output output/big-k.csv --use-gpu --gpu-device cuda:1 --gpu-batch-size 65536 --gpu-max-cap`
+- GPU training: `uv run python src/gmm.py datasets/filtered.csv --output output/big-k.csv --use-gpu --gpu-device cuda:1 --gpu-batch-size 65536 --gpu-max-cap`
