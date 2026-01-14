@@ -1,5 +1,3 @@
-# k=56  BIC=2.440342e+09
-
 import math
 from typing import Sequence
 
@@ -12,11 +10,9 @@ try:
 except ImportError:
     torch = None
 
-def ensure_torch_tensor(data, device: str, dtype=None):
+def ensure_torch_tensor(data, device: str, dtype=torch.float32):
     if torch is None:
         raise ImportError("PyTorch is required for GPU-based operations.")
-    if dtype is None:
-        dtype = torch.float32
     if isinstance(data, torch.Tensor):
         return data.to(device=device, dtype=dtype)
     if isinstance(data, pd.DataFrame):
@@ -186,53 +182,6 @@ def invert_latent_samples_gpu(
         synthetic_df.index = index
     return synthetic_df
 
-def _ensure_psd(cov: torch.Tensor, reg: float = 1e-6) -> torch.Tensor:
-    cov = 0.5 * (cov + cov.transpose(-1, -2))
-    eigvals, eigvecs = torch.linalg.eigh(cov)
-    eigvals = torch.clamp(eigvals, min=reg)
-    return (eigvecs * eigvals) @ eigvecs.transpose(-1, -2)
-
-class TorchGaussianMixture:
-    def __init__(self, weights, means, covariances, log_likelihood, device, dtype):
-        self.weights_ = weights.detach().clone()
-        self.means_ = means.detach().clone()
-        self.covariances_ = covariances.detach().clone()
-        self.log_likelihood_ = log_likelihood
-        self.n_components = self.weights_.shape[0]
-        self.n_features_in_ = self.means_.shape[1]
-        self._device = device
-        self._dtype = dtype
-
-    def _require_torch(self):
-        if torch is None:
-            raise ImportError("PyTorch is required to sample from a TorchGaussianMixture instance.")
-
-    def sample(self, n_samples: int, random_state: int | None = None):
-        self._require_torch()
-        if random_state is None:
-            torch.seed()
-        else:
-            torch.manual_seed(int(random_state))
-
-        device = self._device
-        dtype = self._dtype
-        weights = self.weights_.to(device=device, dtype=dtype)
-        means = self.means_.to(device=device, dtype=dtype)
-        covariances = self.covariances_.to(device=device, dtype=dtype)
-
-        component_ids = torch.multinomial(weights, n_samples, replacement=True)
-        samples = torch.empty((n_samples, self.n_features_in_), device=device, dtype=dtype)
-        for comp in range(self.n_components):
-            mask = component_ids == comp
-            count = int(mask.sum())
-            if count == 0:
-                continue
-            cov = _ensure_psd(covariances[comp], reg=1e-6)
-            dist = torch.distributions.MultivariateNormal(means[comp], covariance_matrix=cov)
-            samples[mask] = dist.sample((count,))
-
-        return samples.cpu().numpy(), component_ids.cpu().numpy()
-
 def sample_with_max_cap(
     gmm,
     n_samples: int,
@@ -282,37 +231,47 @@ def sample_with_max_cap(
 
     return synthetic, labels_out
 
-DP_EM_ENABLED = True
-DP_EM_DATA_L2_CLIP = 5.0
-DP_EM_NK_SIGMA = 0.5
-DP_EM_FIRST_MOMENT_SIGMA = 0.1
-DP_EM_SECOND_MOMENT_SIGMA = 0.1
-DP_EM_COV_EIGEN_MIN = 1e-4
-DP_EM_COV_EIGEN_MAX = 5.0
-DP_EM_SEED = 42
+class TorchGaussianMixture:
+    def __init__(self, weights, means, covariances, log_likelihood, device, dtype):
+        self.weights_ = weights.detach().clone()
+        self.means_ = means.detach().clone()
+        self.covariances_ = covariances.detach().clone()
+        self.log_likelihood_ = log_likelihood
+        self.n_components = self.weights_.shape[0]
+        self.n_features_in_ = self.means_.shape[1]
+        self._device = device
+        self._dtype = dtype
 
-def _clip_l2_rows(matrix: torch.Tensor, max_norm: float) -> torch.Tensor:
-    if max_norm <= 0:
-        raise ValueError("max_norm must be > 0.")
-    norms = torch.linalg.norm(matrix, dim=1, keepdim=True)
-    scale = torch.clamp(max_norm / torch.clamp(norms, min=1e-12), max=1.0)
-    return matrix * scale
+    def _require_torch(self):
+        if torch is None:
+            raise ImportError("PyTorch is required to sample from a TorchGaussianMixture instance.")
 
-def _clip_cov_eigenvalues(cov: torch.Tensor, min_eig: float, max_eig: float) -> torch.Tensor:
-    if min_eig <= 0 or max_eig <= 0 or min_eig > max_eig:
-        raise ValueError("min_eig/max_eig must be > 0 and min_eig <= max_eig.")
-    cov = 0.5 * (cov + cov.transpose(-1, -2))
-    eigvals, eigvecs = torch.linalg.eigh(cov)
-    eigvals = torch.clamp(eigvals, min=min_eig, max=max_eig)
-    return (eigvecs * eigvals) @ eigvecs.transpose(-1, -2)
+    def sample(self, n_samples: int, random_state: int | None = None):
+        self._require_torch()
+        if random_state is None:
+            torch.seed()
+        else:
+            torch.manual_seed(int(random_state))
 
-def _add_noise(tensor: torch.Tensor, sigma: float, generator: torch.Generator) -> torch.Tensor:
-    if sigma <= 0:
-        return tensor
-    noise = torch.randn(tensor.shape, device=tensor.device, dtype=tensor.dtype, generator=generator)
-    return tensor + noise * sigma
+        device = self._device
+        dtype = self._dtype
+        weights = self.weights_.to(device=device, dtype=dtype)
+        means = self.means_.to(device=device, dtype=dtype)
+        covariances = self.covariances_.to(device=device, dtype=dtype)
 
-def fit_best_gmm_gpu_dp(
+        component_ids = torch.multinomial(weights, n_samples, replacement=True)
+        samples = torch.empty((n_samples, self.n_features_in_), device=device, dtype=dtype)
+        for comp in range(self.n_components):
+            mask = component_ids == comp
+            count = int(mask.sum())
+            if count == 0:
+                continue
+            dist = torch.distributions.MultivariateNormal(means[comp], covariance_matrix=covariances[comp])
+            samples[mask] = dist.sample((count,))
+
+        return samples.cpu().numpy(), component_ids.cpu().numpy()
+
+def fit_best_gmm_gpu(
     X_boxcox,
     component_grid,
     random_state: int = 42,
@@ -330,15 +289,6 @@ def fit_best_gmm_gpu_dp(
         raise ImportError("PyTorch is required for GPU-based GMM training. Please install torch with CUDA support.")
     if not torch.cuda.is_available() and device.startswith("cuda"):
         raise RuntimeError("CUDA device requested but not available. Check your PyTorch installation or GPU drivers.")
-    if DP_EM_ENABLED:
-        if DP_EM_DATA_L2_CLIP <= 0:
-            raise ValueError("DP_EM_DATA_L2_CLIP must be > 0.")
-        if DP_EM_NK_SIGMA < 0 or DP_EM_FIRST_MOMENT_SIGMA < 0 or DP_EM_SECOND_MOMENT_SIGMA < 0:
-            raise ValueError("DP_EM_*_SIGMA must be >= 0.")
-        if DP_EM_COV_EIGEN_MIN <= 0 or DP_EM_COV_EIGEN_MAX <= 0:
-            raise ValueError("DP_EM_COV_EIGEN_MIN/MAX must be > 0.")
-        if DP_EM_COV_EIGEN_MIN > DP_EM_COV_EIGEN_MAX:
-            raise ValueError("DP_EM_COV_EIGEN_MIN must be <= DP_EM_COV_EIGEN_MAX.")
 
     torch_device = torch.device(device)
     tensor_dtype = dtype or torch.float32
@@ -351,13 +301,10 @@ def fit_best_gmm_gpu_dp(
     kmeans_batch_size = min(em_batch_size, n_samples)
     generator = torch.Generator(device=torch_device)
     generator.manual_seed(random_state)
-    noise_generator = torch.Generator(device=torch_device)
-    noise_generator.manual_seed(DP_EM_SEED)
 
     data_dtype = data.dtype
     eye = torch.eye(n_features, device=torch_device, dtype=data_dtype)
     log_2pi = torch.log(torch.tensor(2.0 * math.pi, device=torch_device, dtype=data_dtype))
-    data_clipped = _clip_l2_rows(data, DP_EM_DATA_L2_CLIP) if DP_EM_ENABLED else data
 
     def assign_clusters(centers):
         labels = torch.empty(n_samples, dtype=torch.long, device=torch_device)
@@ -453,21 +400,14 @@ def fit_best_gmm_gpu_dp(
                 for start in range(0, n_samples, em_batch_size):
                     end = min(start + em_batch_size, n_samples)
                     batch = data[start:end]
-                    batch_clipped = data_clipped[start:end]
                     batch_log_prob = estimate_log_gaussian_prob_batch(batch, means, cholesky_factors, log_dets)
                     log_prob = batch_log_prob + log_weights
                     log_prob_norm = torch.logsumexp(log_prob, dim=1, keepdim=True)
                     resp = torch.exp(log_prob - log_prob_norm)
                     total_ll += log_prob_norm.sum()
                     nk += resp.sum(dim=0)
-                    first_moment += resp.t() @ batch_clipped
-                    second_moment += torch.einsum("bk,bf,bg->kfg", resp, batch_clipped, batch_clipped)
-
-                if DP_EM_ENABLED:
-                    nk = _add_noise(nk, DP_EM_NK_SIGMA, noise_generator)
-                    first_moment = _add_noise(first_moment, DP_EM_FIRST_MOMENT_SIGMA, noise_generator)
-                    second_moment = _add_noise(second_moment, DP_EM_SECOND_MOMENT_SIGMA, noise_generator)
-                    second_moment = 0.5 * (second_moment + second_moment.transpose(-1, -2))
+                    first_moment += resp.t() @ batch
+                    second_moment += torch.einsum("bk,bf,bg->kfg", resp, batch, batch)
 
                 nk = torch.clamp(nk, min=torch.finfo(data_dtype).eps)
                 weights = nk / nk.sum()
@@ -476,13 +416,6 @@ def fit_best_gmm_gpu_dp(
                 covariances = second_moment / nk.view(-1, 1, 1) - mean_outer
                 covariances = covariances + reg_covar * eye
                 covariances = 0.5 * (covariances + covariances.transpose(-1, -2))
-                if DP_EM_ENABLED:
-                    for comp in range(k):
-                        covariances[comp] = _clip_cov_eigenvalues(
-                            covariances[comp],
-                            DP_EM_COV_EIGEN_MIN,
-                            DP_EM_COV_EIGEN_MAX,
-                        )
                 ll_value = float(total_ll.item())
 
                 if prev_ll is not None and abs(ll_value - prev_ll) <= tol * n_samples:
@@ -511,6 +444,5 @@ def fit_best_gmm_gpu_dp(
 
     if best_model is None:
         raise RuntimeError("GPU GMM training did not yield a valid model.")
-
     bic_df = pd.DataFrame(bic_records)
     return best_model, bic_df

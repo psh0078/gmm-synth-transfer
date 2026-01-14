@@ -8,8 +8,15 @@ from gmm_cpu import (
     invert_latent_samples,
     prepare_boxcox_features_cpu,
 )
-from gmm_gpu_backup import (
-    fit_best_gmm_gpu,
+# from gmm_gpu_backup import (
+#     fit_best_gmm_gpu,
+#     prepare_boxcox_features_gpu,
+#     invert_latent_samples_gpu,
+#     sample_with_max_cap,
+# )
+
+from gmm_gpu import (
+    fit_best_gmm_gpu_dp,
     prepare_boxcox_features_gpu,
     invert_latent_samples_gpu,
     sample_with_max_cap,
@@ -25,7 +32,6 @@ FEATURE_COLS = [
     "st_bytes_xfered",
     "st_faults",
     "st_files_skipped",
-    "st_skipped_errors",
     "st_xfer_time_ms",
     "encrypt_data",
 ]
@@ -38,15 +44,15 @@ COUNT_LIKE_COLS = [
     "st_expired",
     "st_canceled",
     "st_faults",
-    "st_files_skipped",
-    "st_skipped_errors"
+    "st_files_skipped"
 ]
 
 BOOL_LIKE_COLS = ["encrypt_data"]
 
 # shrinking the range to only the cluster counts I "realistically" need
-# DEFAULT_COMPONENT_GRID = [8, 12, 16, 24, 32]
-DEFAULT_COMPONENT_GRID = [32, 40, 48, 56, 64] 
+# DEFAULT_COMPONENT_GRID = [32, 40, 48, 56, 64] 
+DEFAULT_COMPONENT_GRID = [56] 
+# DEFAULT_COMPONENT_GRID = [12, 18, 24, 30, 36] 
 DEFAULT_QUANTILE_LEVELS = np.array([0.0, 0.5, 0.9, 0.95, 0.99, 0.999, 0.9999, 0.99999], dtype=float)
 BOXCOX_SHIFT = 1.0
 DEFAULT_REG_COVAR = 5e-3
@@ -127,8 +133,11 @@ def assemble_dataset(df: pd.DataFrame, synthetic_features: pd.DataFrame):
     synthetic_dataset = df.copy()
     for col in synthetic_features.columns:
         if col in synthetic_dataset.columns:
-            synthetic_dataset[col] = synthetic_features[col]
+            col_min = df[col].min()
+            col_max = df[col].max()
+            synthetic_dataset[col] = synthetic_features[col].clip(lower=col_min, upper=col_max)
     synthetic_dataset = synthetic_dataset[df.columns]
+    synthetic_dataset['sync'] = (synthetic_dataset['st_files_skipped'] > 0).astype(int)
     return synthetic_dataset
 
 def calibrate_feature_column(synthetic_features: pd.DataFrame, df: pd.DataFrame, col: str, quantile_levels):
@@ -150,6 +159,8 @@ def generate_synthetic_dataset(
 ):
     log_stage(f"Loading data from {data_path}")
     df = load_dataframe(data_path)
+    df = df[df['grp_delete'] != True]
+    df = df[df['st_files'] != 0]
     if use_gpu:
         gpu_kwargs = gpu_kwargs or {}
         gpu_device = gpu_kwargs.get("device", "cuda")
@@ -163,7 +174,7 @@ def generate_synthetic_dataset(
         ) = prepare_boxcox_features_gpu(df, FEATURE_COLS, BOXCOX_SHIFT, device=gpu_device)
         log_stage("Training GMM on GPU")
         gpu_args = gpu_kwargs | {"dtype": transformer_gpu.dtype, "random_state": seed}
-        best_gmm, bic_df = fit_best_gmm_gpu(
+        best_gmm, bic_df = fit_best_gmm_gpu_dp(
             X_boxcox_gpu,
             component_grid=component_grid,
             **gpu_args,
