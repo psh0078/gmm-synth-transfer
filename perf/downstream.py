@@ -26,6 +26,7 @@ FEATURE_COLS = [
     "st_faults",
     "st_files_skipped",
     "st_skipped_errors",
+    "encrypt_data",
 ]
 
 DROP_COLS = ["grp_uuid", "user_id", "request_time", "complete_time"]
@@ -69,7 +70,10 @@ def parse_args() -> argparse.Namespace:
 
 def load_dataframe(path: Path, engine: str | None = None) -> pd.DataFrame:
     kwargs = {"engine": engine} if engine else {}
-    return pd.read_csv(path, **kwargs)
+    df = pd.read_csv(path, **kwargs)
+    if "encrypt_data" in df.columns:
+        df["encrypt_data"] = df["encrypt_data"].astype(np.int8)  # True->1, False->0
+    return df
 
 
 def safe_spearman(y_true: np.ndarray, y_pred: np.ndarray) -> float:
